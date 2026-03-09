@@ -8,9 +8,9 @@ energy metering and activity analysis.
 - Shelly RPC over HTTP (`Shelly.GetStatus`, `Shelly.GetDeviceInfo`, `Switch.GetStatus`, `Switch.Set`)
 - Optional Shelly digest auth support
 - Energy usage parsing from `Switch.GetStatus` (`apower`, `aenergy`, `ret_aenergy`)
-- Historical energy data via `EMData.GetData` / `EM1Data.GetData`
-- Net energy history via `GetNetEnergies` (auto fallback: `Switch` -> `EMData` -> `EM1Data`)
-- Query all available Shelly periods (`300`, `900`, `1800`, `3600` seconds)
+- Multi-slot support (for example power strips via `switch:0..n`)
+- Short-range series via `aenergy.by_minute` + `aenergy.minute_ts`
+- Period aggregation (`300`, `900`, `1800`, `3600` seconds) from available switch series
 - Activity detection from energy time series (similar to `flutter_tapo`)
 
 ## Getting Started
@@ -33,49 +33,13 @@ print('Model: ${info.model}');
 print('Power: ${usage.activePowerW} W');
 ```
 
-## Historical Energy Data
+## PlusPlugS / PowerStrip Energy Access
 
 ```dart
-final interval = ShellyEnergyDataInterval.hourly(
-  startDate: DateTime(2026, 1, 1),
-  endDate: DateTime(2026, 1, 2),
-  componentId: 0,
-  rpcNamespace: 'EMData', // or EM1Data
-);
-
-final data = await client.getEnergyData(interval);
-for (final point in data.points) {
-  print('${point.start}: ${point.energyWh} Wh');
-}
-```
-
-## All Available Periods
-
-```dart
-final allPeriods = await client.getEnergyDataForAllPeriods(
-  startDate: DateTime(2026, 1, 1),
-  endDate: DateTime(2026, 1, 2),
-  componentId: 0,
-  rpcNamespace: 'EMData',
-);
-
-for (final entry in allPeriods.entries) {
-  print('${entry.key.apiName}: ${entry.value.points.length} points');
-}
-```
-
-## Net Energies (GetNetEnergies)
-
-```dart
-final netData = await client.getNetEnergies(
-  startDate: DateTime(2026, 1, 1),
-  endDate: DateTime(2026, 1, 2),
-  period: ShellyEnergyPeriod.hourly,
-  componentId: 0, // for power strips: slot/switch id
-);
-
-print('Metric: ${netData.metricKey}');
-print('Points: ${netData.points.length}');
+final usage = await client.getEnergyUsage(id: 0); // slot id
+print('Power: ${usage.activePowerW} W');
+print('Total: ${usage.totalActiveEnergyWh} Wh');
+print('by_minute: ${usage.byMinuteMilliWattHours}');
 ```
 
 ## Activity Detection
@@ -95,5 +59,6 @@ for (final activity in activityData.activities()) {
 ## Notes
 
 - The device must be reachable in your local network.
-- `EMData.GetData`/`EM1Data.GetData` availability depends on the specific Shelly device and firmware.
-- For multi-channel devices (for example power strips), query each component ID separately.
+- For PlusPlugS/PowerStrip, the relevant path is `switch:<id>.aenergy` from `Switch.GetStatus`/`Shelly.GetStatus`.
+- `aenergy.by_minute` is short retention (latest complete minutes). For day/week/month views, store `aenergy.total` over time and aggregate externally (same pattern Home Assistant uses with recorder/statistics).
+- `EMData`/`EM1Data` calls are device-dependent and are not available on many switch-only devices.

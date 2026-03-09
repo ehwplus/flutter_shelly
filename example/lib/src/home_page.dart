@@ -18,12 +18,6 @@ class _HomePageState extends State<HomePage> {
   final _portController = TextEditingController(text: '80');
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
-  // Advanced override for devices with multiple EMData/EM1Data components.
-  final _componentIdController = TextEditingController(text: '0');
-  // Advanced override for RPC namespace (`Switch`, `EMData`, `EM1Data`).
-  final _rpcNamespaceController = TextEditingController(text: 'EMData');
-  // Advanced override to force a specific energy metric key from multi-key payloads.
-  final _metricKeyController = TextEditingController();
 
   HttpShellyApiClient? _client;
   ShellyDeviceInfo? _deviceInfo;
@@ -56,9 +50,6 @@ class _HomePageState extends State<HomePage> {
     _portController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
-    _componentIdController.dispose();
-    _rpcNamespaceController.dispose();
-    _metricKeyController.dispose();
     super.dispose();
   }
 
@@ -78,12 +69,6 @@ class _HomePageState extends State<HomePage> {
       _selectedSwitchId = _normalizeSwitchId(
         int.tryParse(prefs.getString('shelly_switch_id') ?? '0') ?? 0,
       );
-      _componentIdController.text =
-          prefs.getString('shelly_component_id') ?? _componentIdController.text;
-      _rpcNamespaceController.text =
-          prefs.getString('shelly_rpc_namespace') ??
-          _rpcNamespaceController.text;
-      _metricKeyController.text = prefs.getString('shelly_metric_key') ?? '';
       _useHttps = prefs.getBool('shelly_https') ?? false;
     });
   }
@@ -95,18 +80,6 @@ class _HomePageState extends State<HomePage> {
     await prefs.setString('shelly_username', _usernameController.text.trim());
     await prefs.setString('shelly_password', _passwordController.text);
     await prefs.setString('shelly_switch_id', _selectedSwitchId.toString());
-    await prefs.setString(
-      'shelly_component_id',
-      _componentIdController.text.trim(),
-    );
-    await prefs.setString(
-      'shelly_rpc_namespace',
-      _rpcNamespaceController.text.trim(),
-    );
-    await prefs.setString(
-      'shelly_metric_key',
-      _metricKeyController.text.trim(),
-    );
     await prefs.setBool('shelly_https', _useHttps);
   }
 
@@ -158,18 +131,12 @@ class _HomePageState extends State<HomePage> {
 
         final deviceInfo = await createdClient.getDeviceInfo();
         final status = await createdClient.getStatus();
-        final components = await createdClient.getEnergyComponents();
         final availableSwitchIds = _extractSwitchIds(status);
         final selectedSwitchId = _normalizeSwitchIdForList(
           _selectedSwitchId,
           availableSwitchIds,
         );
         final usage = await createdClient.getEnergyUsage(id: selectedSwitchId);
-
-        if (components.isNotEmpty) {
-          _rpcNamespaceController.text = components.first.rpcNamespace;
-          _componentIdController.text = components.first.id.toString();
-        }
 
         await _savePrefs();
 
@@ -200,18 +167,12 @@ class _HomePageState extends State<HomePage> {
     await _runBusy(() async {
       final client = _requireClient();
       final status = await client.getStatus();
-      final components = await client.getEnergyComponents();
       final availableSwitchIds = _extractSwitchIds(status);
       final selectedSwitchId = _normalizeSwitchIdForList(
         _selectedSwitchId,
         availableSwitchIds,
       );
       final usage = await client.getEnergyUsage(id: selectedSwitchId);
-
-      if (components.isNotEmpty) {
-        _rpcNamespaceController.text = components.first.rpcNamespace;
-        _componentIdController.text = components.first.id.toString();
-      }
 
       if (!mounted) {
         return;
@@ -273,7 +234,7 @@ class _HomePageState extends State<HomePage> {
     await _runBusy(() async {
       final client = _requireClient();
       final usage = await client.getEnergyUsage(id: _switchId);
-      final rangeData = await _loadRangeConsumptionData(client);
+      final rangeData = _loadRangeConsumptionData(usage);
 
       if (!mounted) {
         return;
@@ -285,26 +246,66 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<ShellyEnergyData> _loadRangeConsumptionData(
-    HttpShellyApiClient client,
-  ) async {
-    final metricKey = _metricKeyController.text.trim();
-    final metric = metricKey.isEmpty ? null : metricKey;
-    final rpcNamespace = _rpcNamespaceController.text.trim();
+  ShellyEnergyData _loadRangeConsumptionData(ShellyEnergyUsage usage) {
+    final minutePoints = usage.byMinuteMilliWattHours;
+    final selectedPeriod = _selectedPeriod;
+    final periodSeconds = selectedPeriod.seconds;
+    final rangeStartTs = _normalizedStartDate.millisecondsSinceEpoch ~/ 1000;
+    final rangeEndTs = _normalizedEndDate.millisecondsSinceEpoch ~/ 1000;
+    final intervalType = _toIntervalType(selectedPeriod);
 
-    try {
-      return await client.getNetEnergies(
-        startDate: _normalizedStartDate,
-        endDate: _normalizedEndDate,
-        period: _selectedPeriod,
-        componentId: _switchId,
-        rpcNamespace: rpcNamespace.isEmpty ? null : rpcNamespace,
-        metricKey: metric,
+    if (minutePoints.isEmpty || usage.minuteTimestamp <= 0) {
+      return ShellyEnergyData(
+        intervalType: intervalType,
+        period: selectedPeriod,
+        metricKey: 'aenergy.by_minute',
+        points: const [],
+        availableKeys: const ['aenergy.by_minute'],
       );
-    } catch (_) {
-      final interval = _createInterval();
-      return client.getEnergyData(interval);
     }
+
+    final byBucketTs = <int, double>{};
+    final currentMinuteStartTs = usage.minuteTimestamp;
+    for (var index = 0; index < minutePoints.length; index += 1) {
+      final minuteStartTs =
+          currentMinuteStartTs - ((minutePoints.length - index) * 60);
+      if (minuteStartTs < rangeStartTs || minuteStartTs > rangeEndTs) {
+        continue;
+      }
+      final bucketTs = (minuteStartTs ~/ periodSeconds) * periodSeconds;
+      byBucketTs[bucketTs] =
+          (byBucketTs[bucketTs] ?? 0) + (minutePoints[index] / 1000);
+    }
+
+    final sortedTs = byBucketTs.keys.toList(growable: false)..sort();
+    final points = sortedTs
+        .map(
+          (ts) => ShellyEnergyDataPoint(
+            start: DateTime.fromMillisecondsSinceEpoch(ts * 1000),
+            energyWh: byBucketTs[ts] ?? 0,
+          ),
+        )
+        .toList(growable: false);
+
+    return ShellyEnergyData(
+      intervalType: intervalType,
+      period: selectedPeriod,
+      metricKey: 'aenergy.by_minute',
+      points: points,
+      availableKeys: const ['aenergy.by_minute'],
+    );
+  }
+
+  ShellyEnergyDataIntervalType _toIntervalType(ShellyEnergyPeriod period) {
+    return switch (period) {
+      ShellyEnergyPeriod.fiveMinutes =>
+        ShellyEnergyDataIntervalType.fiveMinutes,
+      ShellyEnergyPeriod.fifteenMinutes =>
+        ShellyEnergyDataIntervalType.fifteenMinutes,
+      ShellyEnergyPeriod.thirtyMinutes =>
+        ShellyEnergyDataIntervalType.thirtyMinutes,
+      ShellyEnergyPeriod.hourly => ShellyEnergyDataIntervalType.hourly,
+    };
   }
 
   List<int> _extractSwitchIds(Map<String, dynamic> status) {
@@ -383,44 +384,6 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  ShellyEnergyDataInterval _createInterval() {
-    final metricKey = _metricKeyController.text.trim();
-    final metric = metricKey.isEmpty ? null : metricKey;
-
-    return switch (_selectedPeriod) {
-      ShellyEnergyPeriod.fiveMinutes => ShellyEnergyDataInterval.fiveMinutes(
-        startDate: _normalizedStartDate,
-        endDate: _normalizedEndDate,
-        componentId: _componentId,
-        rpcNamespace: _rpcNamespace,
-        metricKey: metric,
-      ),
-      ShellyEnergyPeriod.fifteenMinutes =>
-        ShellyEnergyDataInterval.fifteenMinutes(
-          startDate: _normalizedStartDate,
-          endDate: _normalizedEndDate,
-          componentId: _componentId,
-          rpcNamespace: _rpcNamespace,
-          metricKey: metric,
-        ),
-      ShellyEnergyPeriod.thirtyMinutes =>
-        ShellyEnergyDataInterval.thirtyMinutes(
-          startDate: _normalizedStartDate,
-          endDate: _normalizedEndDate,
-          componentId: _componentId,
-          rpcNamespace: _rpcNamespace,
-          metricKey: metric,
-        ),
-      ShellyEnergyPeriod.hourly => ShellyEnergyDataInterval.hourly(
-        startDate: _normalizedStartDate,
-        endDate: _normalizedEndDate,
-        componentId: _componentId,
-        rpcNamespace: _rpcNamespace,
-        metricKey: metric,
-      ),
-    };
-  }
-
   HttpShellyApiClient _requireClient() {
     final client = _client;
     if (client == null) {
@@ -430,8 +393,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   int get _switchId => _selectedSwitchId;
-
-  int get _componentId => int.tryParse(_componentIdController.text.trim()) ?? 0;
 
   int _normalizeSwitchId(int value) {
     return _normalizeSwitchIdForList(value, _availableSwitchIds);
@@ -445,11 +406,6 @@ class _HomePageState extends State<HomePage> {
       return value;
     }
     return switchIds.first;
-  }
-
-  String get _rpcNamespace {
-    final namespace = _rpcNamespaceController.text.trim();
-    return namespace.isEmpty ? 'EMData' : namespace;
   }
 
   DateTime get _normalizedStartDate {
@@ -619,10 +575,8 @@ class _HomePageState extends State<HomePage> {
               },
             ),
             const SizedBox(height: 8),
-            // Advanced inputs are intentionally hidden in this intermediate UI:
-            // - `_componentIdController`: EMData/EM1Data component index override.
-            // - `_rpcNamespaceController`: force `Switch`/`EMData`/`EM1Data`.
-            // - `_metricKeyController`: force a specific key from multi-key responses.
+            // Erweiterte RPC-Felder sind hier bewusst ausgeblendet.
+            // Fuer PlusPlugS/PowerStrip nutzen wir direkt `switch:<id>.aenergy`.
             DropdownButtonFormField<ShellyEnergyPeriod>(
               initialValue: _selectedPeriod,
               decoration: const InputDecoration(labelText: 'Periode'),
@@ -662,6 +616,14 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Hinweis: PlusPlugS/PowerStrip liefern lokal nur '
+              '`aenergy.by_minute` (kurzer Verlauf) und `aenergy.total` '
+              '(Zaehlerstand). Tag/Woche/Monat entsteht durch fortlaufendes '
+              'Speichern von `aenergy.total`.',
+              style: TextStyle(color: Colors.black87),
             ),
             const SizedBox(height: 12),
             Wrap(
@@ -840,6 +802,12 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 8),
             _valueRow('Metric key', data.metricKey),
+            if (data.metricKey == 'aenergy.by_minute')
+              const Text(
+                'Hinweis: Diese Geraete liefern den Verlauf direkt ueber '
+                '`switch:<id>.aenergy.by_minute` (letzte vollen Minuten).',
+                style: TextStyle(color: Colors.orange),
+              ),
             _valueRow('Points', data.points.length.toString()),
             _valueRow('Total', '${_fmtDouble(totalEnergy)} Wh'),
             _valueRow('Period', _periodLabel(data.period)),

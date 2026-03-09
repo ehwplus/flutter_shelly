@@ -8,8 +8,8 @@ Demo app for testing `flutter_shelly` against local Shelly devices.
 - optional RPC auth (username/password)
 - load device info and full status
 - read current switch energy usage
-- query historical energy data (`EMData` / `EM1Data`)
-- query all available periods (`300`, `900`, `1800`, `3600` seconds)
+- select slot/switch (`switch:0..n`) for multi-channel devices
+- load aggregated consumption from `aenergy.by_minute` for periods (`300`, `900`, `1800`, `3600` seconds)
 - evaluate activities from loaded time series
 
 ## Run

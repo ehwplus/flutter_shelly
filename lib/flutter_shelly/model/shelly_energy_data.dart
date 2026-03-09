@@ -509,6 +509,11 @@ class ShellyEnergyData {
     }
 
     const candidates = [
+      'net_act_energy',
+      'a_net_act_energy',
+      'b_net_act_energy',
+      'c_net_act_energy',
+      'net_energy',
       'total_act_energy',
       'a_total_act_energy',
       'b_total_act_energy',

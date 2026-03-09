@@ -9,6 +9,7 @@ energy metering and activity analysis.
 - Optional Shelly digest auth support
 - Energy usage parsing from `Switch.GetStatus` (`apower`, `aenergy`, `ret_aenergy`)
 - Historical energy data via `EMData.GetData` / `EM1Data.GetData`
+- Net energy history via `GetNetEnergies` (auto fallback: `Switch` -> `EMData` -> `EM1Data`)
 - Query all available Shelly periods (`300`, `900`, `1800`, `3600` seconds)
 - Activity detection from energy time series (similar to `flutter_tapo`)
 
@@ -61,6 +62,20 @@ final allPeriods = await client.getEnergyDataForAllPeriods(
 for (final entry in allPeriods.entries) {
   print('${entry.key.apiName}: ${entry.value.points.length} points');
 }
+```
+
+## Net Energies (GetNetEnergies)
+
+```dart
+final netData = await client.getNetEnergies(
+  startDate: DateTime(2026, 1, 1),
+  endDate: DateTime(2026, 1, 2),
+  period: ShellyEnergyPeriod.hourly,
+  componentId: 0, // for power strips: slot/switch id
+);
+
+print('Metric: ${netData.metricKey}');
+print('Points: ${netData.points.length}');
 ```
 
 ## Activity Detection

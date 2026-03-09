@@ -18,9 +18,11 @@ class _HomePageState extends State<HomePage> {
   final _portController = TextEditingController(text: '80');
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
-  final _switchIdController = TextEditingController(text: '0');
+  // Advanced override for devices with multiple EMData/EM1Data components.
   final _componentIdController = TextEditingController(text: '0');
+  // Advanced override for RPC namespace (`Switch`, `EMData`, `EM1Data`).
   final _rpcNamespaceController = TextEditingController(text: 'EMData');
+  // Advanced override to force a specific energy metric key from multi-key payloads.
   final _metricKeyController = TextEditingController();
 
   HttpShellyApiClient? _client;
@@ -28,9 +30,7 @@ class _HomePageState extends State<HomePage> {
   Map<String, dynamic>? _status;
   ShellyEnergyUsage? _energyUsage;
   ShellyEnergyData? _energyData;
-  Map<ShellyEnergyPeriod, ShellyEnergyData> _allPeriodsData = const {};
-  List<ShellyEnergyActivity> _activities = const [];
-  List<ShellyEnergyComponent> _energyComponents = const [];
+  List<int> _availableSwitchIds = const [0, 1, 2, 3];
 
   bool _useHttps = false;
   bool _isLoading = false;
@@ -39,6 +39,7 @@ class _HomePageState extends State<HomePage> {
   ShellyEnergyPeriod _selectedPeriod = ShellyEnergyPeriod.hourly;
   DateTime _startDate = DateTime.now().subtract(const Duration(days: 1));
   DateTime _endDate = DateTime.now();
+  int _selectedSwitchId = 0;
 
   bool get _isConnected => _client != null;
 
@@ -55,7 +56,6 @@ class _HomePageState extends State<HomePage> {
     _portController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
-    _switchIdController.dispose();
     _componentIdController.dispose();
     _rpcNamespaceController.dispose();
     _metricKeyController.dispose();
@@ -75,8 +75,9 @@ class _HomePageState extends State<HomePage> {
           prefs.getString('shelly_port') ?? _portController.text;
       _usernameController.text = prefs.getString('shelly_username') ?? '';
       _passwordController.text = prefs.getString('shelly_password') ?? '';
-      _switchIdController.text =
-          prefs.getString('shelly_switch_id') ?? _switchIdController.text;
+      _selectedSwitchId = _normalizeSwitchId(
+        int.tryParse(prefs.getString('shelly_switch_id') ?? '0') ?? 0,
+      );
       _componentIdController.text =
           prefs.getString('shelly_component_id') ?? _componentIdController.text;
       _rpcNamespaceController.text =
@@ -93,7 +94,7 @@ class _HomePageState extends State<HomePage> {
     await prefs.setString('shelly_port', _portController.text.trim());
     await prefs.setString('shelly_username', _usernameController.text.trim());
     await prefs.setString('shelly_password', _passwordController.text);
-    await prefs.setString('shelly_switch_id', _switchIdController.text.trim());
+    await prefs.setString('shelly_switch_id', _selectedSwitchId.toString());
     await prefs.setString(
       'shelly_component_id',
       _componentIdController.text.trim(),
@@ -158,7 +159,17 @@ class _HomePageState extends State<HomePage> {
         final deviceInfo = await createdClient.getDeviceInfo();
         final status = await createdClient.getStatus();
         final components = await createdClient.getEnergyComponents();
-        final usage = await createdClient.getEnergyUsage(id: _switchId);
+        final availableSwitchIds = _extractSwitchIds(status);
+        final selectedSwitchId = _normalizeSwitchIdForList(
+          _selectedSwitchId,
+          availableSwitchIds,
+        );
+        final usage = await createdClient.getEnergyUsage(id: selectedSwitchId);
+
+        if (components.isNotEmpty) {
+          _rpcNamespaceController.text = components.first.rpcNamespace;
+          _componentIdController.text = components.first.id.toString();
+        }
 
         await _savePrefs();
 
@@ -172,11 +183,10 @@ class _HomePageState extends State<HomePage> {
           _client = createdClient;
           _deviceInfo = deviceInfo;
           _status = status;
-          _energyComponents = components;
+          _availableSwitchIds = availableSwitchIds;
+          _selectedSwitchId = selectedSwitchId;
           _energyUsage = usage;
           _energyData = null;
-          _allPeriodsData = const {};
-          _activities = const [];
         });
         oldClient?.close();
       } catch (_) {
@@ -191,7 +201,17 @@ class _HomePageState extends State<HomePage> {
       final client = _requireClient();
       final status = await client.getStatus();
       final components = await client.getEnergyComponents();
-      final usage = await client.getEnergyUsage(id: _switchId);
+      final availableSwitchIds = _extractSwitchIds(status);
+      final selectedSwitchId = _normalizeSwitchIdForList(
+        _selectedSwitchId,
+        availableSwitchIds,
+      );
+      final usage = await client.getEnergyUsage(id: selectedSwitchId);
+
+      if (components.isNotEmpty) {
+        _rpcNamespaceController.text = components.first.rpcNamespace;
+        _componentIdController.text = components.first.id.toString();
+      }
 
       if (!mounted) {
         return;
@@ -199,7 +219,8 @@ class _HomePageState extends State<HomePage> {
 
       setState(() {
         _status = status;
-        _energyComponents = components;
+        _availableSwitchIds = availableSwitchIds;
+        _selectedSwitchId = selectedSwitchId;
         _energyUsage = usage;
       });
     });
@@ -210,7 +231,12 @@ class _HomePageState extends State<HomePage> {
       final client = _requireClient();
       await client.setSwitchState(on, id: _switchId);
       final status = await client.getStatus();
-      final usage = await client.getEnergyUsage(id: _switchId);
+      final availableSwitchIds = _extractSwitchIds(status);
+      final selectedSwitchId = _normalizeSwitchIdForList(
+        _selectedSwitchId,
+        availableSwitchIds,
+      );
+      final usage = await client.getEnergyUsage(id: selectedSwitchId);
 
       if (!mounted) {
         return;
@@ -219,76 +245,83 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         _status = status;
         _energyUsage = usage;
+        _availableSwitchIds = availableSwitchIds;
+        _selectedSwitchId = selectedSwitchId;
       });
     });
+  }
+
+  Future<void> _onSwitchIdChanged(int switchId) async {
+    final normalized = _normalizeSwitchId(switchId);
+    if (normalized == _selectedSwitchId) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _selectedSwitchId = normalized;
+      _energyData = null;
+    });
+    await _savePrefs();
+    if (_isConnected) {
+      await _loadEnergyUsage();
+    }
   }
 
   Future<void> _loadEnergyUsage() async {
     await _runBusy(() async {
       final client = _requireClient();
       final usage = await client.getEnergyUsage(id: _switchId);
+      final rangeData = await _loadRangeConsumptionData(client);
 
       if (!mounted) {
         return;
       }
       setState(() {
         _energyUsage = usage;
+        _energyData = rangeData;
       });
     });
   }
 
-  Future<void> _loadEnergyData() async {
-    await _runBusy(() async {
-      final client = _requireClient();
-      final interval = _createInterval(activityMode: false);
-      final data = await client.getEnergyData(interval);
+  Future<ShellyEnergyData> _loadRangeConsumptionData(
+    HttpShellyApiClient client,
+  ) async {
+    final metricKey = _metricKeyController.text.trim();
+    final metric = metricKey.isEmpty ? null : metricKey;
+    final rpcNamespace = _rpcNamespaceController.text.trim();
 
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _energyData = data;
-        _activities = const [];
-      });
-    });
-  }
-
-  Future<void> _loadActivities() async {
-    await _runBusy(() async {
-      final client = _requireClient();
-      final interval = _createInterval(activityMode: true);
-      final data = await client.getEnergyData(interval);
-      final activities = data.activities();
-
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _energyData = data;
-        _activities = activities;
-      });
-    });
-  }
-
-  Future<void> _loadAllPeriods() async {
-    await _runBusy(() async {
-      final client = _requireClient();
-      final metricKey = _metricKeyController.text.trim();
-      final allData = await client.getEnergyDataForAllPeriods(
+    try {
+      return await client.getNetEnergies(
         startDate: _normalizedStartDate,
         endDate: _normalizedEndDate,
-        componentId: _componentId,
-        rpcNamespace: _rpcNamespace,
-        metricKey: metricKey.isEmpty ? null : metricKey,
+        period: _selectedPeriod,
+        componentId: _switchId,
+        rpcNamespace: rpcNamespace.isEmpty ? null : rpcNamespace,
+        metricKey: metric,
       );
+    } catch (_) {
+      final interval = _createInterval();
+      return client.getEnergyData(interval);
+    }
+  }
 
-      if (!mounted) {
-        return;
+  List<int> _extractSwitchIds(Map<String, dynamic> status) {
+    final ids = <int>{};
+    for (final key in status.keys) {
+      final match = RegExp(r'^switch:(\d+)$').firstMatch(key);
+      final parsed = int.tryParse(match?.group(1) ?? '');
+      if (parsed != null) {
+        ids.add(parsed);
       }
-      setState(() {
-        _allPeriodsData = allData;
-      });
-    });
+    }
+
+    if (ids.isEmpty) {
+      return const [0, 1, 2, 3];
+    }
+    final sorted = ids.toList(growable: false)..sort();
+    return sorted;
   }
 
   Future<void> _pickDate({required bool isStart}) async {
@@ -350,20 +383,9 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  ShellyEnergyDataInterval _createInterval({required bool activityMode}) {
+  ShellyEnergyDataInterval _createInterval() {
     final metricKey = _metricKeyController.text.trim();
     final metric = metricKey.isEmpty ? null : metricKey;
-
-    if (activityMode) {
-      return ShellyEnergyDataInterval.activity(
-        startDate: _normalizedStartDate,
-        endDate: _normalizedEndDate,
-        period: _selectedPeriod,
-        componentId: _componentId,
-        rpcNamespace: _rpcNamespace,
-        metricKey: metric,
-      );
-    }
 
     return switch (_selectedPeriod) {
       ShellyEnergyPeriod.fiveMinutes => ShellyEnergyDataInterval.fiveMinutes(
@@ -407,9 +429,23 @@ class _HomePageState extends State<HomePage> {
     return client;
   }
 
-  int get _switchId => int.tryParse(_switchIdController.text.trim()) ?? 0;
+  int get _switchId => _selectedSwitchId;
 
   int get _componentId => int.tryParse(_componentIdController.text.trim()) ?? 0;
+
+  int _normalizeSwitchId(int value) {
+    return _normalizeSwitchIdForList(value, _availableSwitchIds);
+  }
+
+  int _normalizeSwitchIdForList(int value, List<int> switchIds) {
+    if (switchIds.isEmpty) {
+      return 0;
+    }
+    if (switchIds.contains(value)) {
+      return value;
+    }
+    return switchIds.first;
+  }
 
   String get _rpcNamespace {
     final namespace = _rpcNamespaceController.text.trim();
@@ -450,10 +486,6 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(height: 12),
                 _buildStatusCard(_status!),
               ],
-              if (_energyComponents.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                _buildEnergyComponentsCard(),
-              ],
               if (_energyUsage != null) ...[
                 const SizedBox(height: 12),
                 _buildEnergyUsageCard(_energyUsage!),
@@ -461,14 +493,6 @@ class _HomePageState extends State<HomePage> {
               if (_energyData != null) ...[
                 const SizedBox(height: 12),
                 _buildEnergyDataCard(_energyData!),
-              ],
-              if (_activities.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                _buildActivitiesCard(_activities),
-              ],
-              if (_allPeriodsData.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                _buildAllPeriodsCard(_allPeriodsData),
               ],
             ],
           ),
@@ -487,6 +511,11 @@ class _HomePageState extends State<HomePage> {
             const Text(
               'Verbindung',
               style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Hinweis: 192.168.x.x funktioniert nur im lokalen Netz. '
+              'Fuer externen Zugriff HTTPS mit oeffentlicher Adresse oder VPN verwenden.',
             ),
             const SizedBox(height: 8),
             TextField(
@@ -570,44 +599,30 @@ class _HomePageState extends State<HomePage> {
               style: TextStyle(fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _switchIdController,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(labelText: 'Switch ID'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextField(
-                    controller: _componentIdController,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      labelText: 'Component ID',
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _rpcNamespaceController,
+            DropdownButtonFormField<int>(
+              key: ValueKey<int>(_selectedSwitchId),
+              initialValue: _selectedSwitchId,
               decoration: const InputDecoration(
-                labelText: 'RPC Namespace',
-                hintText: 'EMData oder EM1Data',
+                labelText: 'Steckplatz (Switch ID)',
               ),
+              items: _availableSwitchIds
+                  .map(
+                    (id) =>
+                        DropdownMenuItem(value: id, child: Text('Slot $id')),
+                  )
+                  .toList(growable: false),
+              onChanged: (value) {
+                if (value == null) {
+                  return;
+                }
+                _onSwitchIdChanged(value);
+              },
             ),
             const SizedBox(height: 8),
-            TextField(
-              controller: _metricKeyController,
-              decoration: const InputDecoration(
-                labelText: 'Metric Key (optional)',
-                hintText: 'z.B. total_act_energy',
-              ),
-            ),
-            const SizedBox(height: 8),
+            // Advanced inputs are intentionally hidden in this intermediate UI:
+            // - `_componentIdController`: EMData/EM1Data component index override.
+            // - `_rpcNamespaceController`: force `Switch`/`EMData`/`EM1Data`.
+            // - `_metricKeyController`: force a specific key from multi-key responses.
             DropdownButtonFormField<ShellyEnergyPeriod>(
               initialValue: _selectedPeriod,
               decoration: const InputDecoration(labelText: 'Periode'),
@@ -653,29 +668,6 @@ class _HomePageState extends State<HomePage> {
               spacing: 8,
               runSpacing: 8,
               children: [
-                FilledButton(
-                  onPressed: _isConnected ? _loadEnergyUsage : null,
-                  child: const Text('Verbrauch laden'),
-                ),
-                FilledButton.tonal(
-                  onPressed: _isConnected ? _loadEnergyData : null,
-                  child: const Text('Zeitreihe laden'),
-                ),
-                FilledButton.tonal(
-                  onPressed: _isConnected ? _loadActivities : null,
-                  child: const Text('Aktivitaeten auswerten'),
-                ),
-                OutlinedButton(
-                  onPressed: _isConnected ? _loadAllPeriods : null,
-                  child: const Text('Alle Perioden laden'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
                 OutlinedButton(
                   onPressed: _isConnected ? () => _setSwitchState(true) : null,
                   child: const Text('Switch ON'),
@@ -683,6 +675,10 @@ class _HomePageState extends State<HomePage> {
                 OutlinedButton(
                   onPressed: _isConnected ? () => _setSwitchState(false) : null,
                   child: const Text('Switch OFF'),
+                ),
+                FilledButton(
+                  onPressed: _isConnected ? _loadEnergyUsage : null,
+                  child: const Text('Verbrauch laden'),
                 ),
               ],
             ),
@@ -743,27 +739,12 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _buildEnergyComponentsCard() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Gefundene Energy Components',
-              style: TextStyle(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            for (final component in _energyComponents)
-              Text('- ${component.rpcNamespace} (id: ${component.id})'),
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildEnergyUsageCard(ShellyEnergyUsage usage) {
+    final byMinutePoints = _buildByMinutePoints(usage);
+    final seriesEntries = usage.activeEnergySeries.entries.toList(
+      growable: false,
+    )..sort((a, b) => a.key.compareTo(b.key));
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -806,12 +787,34 @@ class _HomePageState extends State<HomePage> {
                   ? '-'
                   : '${_fmtDouble(usage.frequencyHz)} Hz',
             ),
-            _valueRow('Minute TS', usage.minuteTimestamp.toString()),
-            if (usage.byMinuteWh.isNotEmpty)
-              _valueRow(
-                'by_minute',
-                usage.byMinuteWh.map((value) => _fmtDouble(value)).join(', '),
+            _valueRow(
+              'aenergy.minute_ts',
+              _formatUnixSecondTimestamp(usage.minuteTimestamp),
+            ),
+            if (seriesEntries.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              const Text(
+                'Verfuegbare aenergy-Zeitbereiche',
+                style: TextStyle(fontWeight: FontWeight.w600),
               ),
+              const SizedBox(height: 4),
+              for (final entry in seriesEntries)
+                _valueRow(entry.key, _formatEnergySeriesValues(entry.value)),
+            ],
+            if (byMinutePoints.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              const Text(
+                'aenergy.by_minute (letzte vollen Minuten)',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 4),
+              for (final point in byMinutePoints)
+                Text(
+                  '${_formatDateTime(point.start)}-${_formatDateTime(point.end)}: '
+                  '${_fmtDouble(point.energyMilliWh, fractionDigits: 0)} mWh '
+                  '(${_fmtDouble(point.energyWh, fractionDigits: 3)} Wh)',
+                ),
+            ],
           ],
         ),
       ),
@@ -832,7 +835,7 @@ class _HomePageState extends State<HomePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Energy Data',
+              'Verbrauch Verlauf',
               style: TextStyle(fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
@@ -840,6 +843,10 @@ class _HomePageState extends State<HomePage> {
             _valueRow('Points', data.points.length.toString()),
             _valueRow('Total', '${_fmtDouble(totalEnergy)} Wh'),
             _valueRow('Period', _periodLabel(data.period)),
+            _valueRow(
+              'Range',
+              '${_formatDate(_startDate)} bis ${_formatDate(_endDate)}',
+            ),
             if (data.availableKeys.isNotEmpty)
               _valueRow('Available keys', data.availableKeys.join(', ')),
             const SizedBox(height: 8),
@@ -851,58 +858,6 @@ class _HomePageState extends State<HomePage> {
               ),
             if (data.points.length > preview.length)
               Text('... ${data.points.length - preview.length} weitere Punkte'),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildActivitiesCard(List<ShellyEnergyActivity> activities) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Aktivitaeten',
-              style: TextStyle(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            for (final activity in activities)
-              Text(
-                '${_formatDateTime(activity.start)} -> ${_formatDateTime(activity.end)} '
-                '(${_fmtDouble(activity.energyWh)} Wh)',
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAllPeriodsCard(
-    Map<ShellyEnergyPeriod, ShellyEnergyData> byPeriod,
-  ) {
-    final entries = byPeriod.entries.toList(growable: false)
-      ..sort((a, b) => a.key.seconds.compareTo(b.key.seconds));
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Alle verfuegbaren Perioden',
-              style: TextStyle(fontWeight: FontWeight.w700),
-            ),
-            const SizedBox(height: 8),
-            for (final entry in entries)
-              _valueRow(
-                _periodLabel(entry.key),
-                '${entry.value.points.length} Punkte, '
-                '${_fmtDouble(entry.value.points.fold<double>(0, (sum, point) => sum + point.energyWh))} Wh',
-              ),
           ],
         ),
       ),
@@ -962,6 +917,63 @@ class _HomePageState extends State<HomePage> {
     return value.toStringAsFixed(fractionDigits);
   }
 
+  String _formatEnergySeriesValues(List<double> values) {
+    if (values.isEmpty) {
+      return '-';
+    }
+
+    const previewCount = 8;
+    final preview = values.length <= previewCount
+        ? values
+        : values.sublist(values.length - previewCount);
+    final summary = preview.map((value) => _fmtDouble(value)).join(', ');
+    if (values.length > preview.length) {
+      return '$summary ... (${values.length} Werte)';
+    }
+    return '$summary (${values.length} Werte)';
+  }
+
+  String _formatUnixSecondTimestamp(int timestamp) {
+    if (timestamp <= 0) {
+      return '-';
+    }
+
+    final utc = DateTime.fromMillisecondsSinceEpoch(
+      timestamp * 1000,
+      isUtc: true,
+    );
+    return '${_formatDateTime(utc)} UTC / ${_formatDateTime(utc.toLocal())} lokal';
+  }
+
+  List<_ByMinutePoint> _buildByMinutePoints(ShellyEnergyUsage usage) {
+    final values = usage.byMinuteMilliWattHours;
+    if (usage.minuteTimestamp <= 0 || values.isEmpty) {
+      return const [];
+    }
+
+    final currentMinuteStartUtc = DateTime.fromMillisecondsSinceEpoch(
+      usage.minuteTimestamp * 1000,
+      isUtc: true,
+    );
+    final points = <_ByMinutePoint>[];
+    for (var index = 0; index < values.length; index += 1) {
+      final startUtc = currentMinuteStartUtc.subtract(
+        Duration(minutes: values.length - index),
+      );
+      final endUtc = startUtc.add(const Duration(minutes: 1));
+      final energyMilliWh = values[index];
+      points.add(
+        _ByMinutePoint(
+          start: startUtc.toLocal(),
+          end: endUtc.toLocal(),
+          energyMilliWh: energyMilliWh,
+          energyWh: energyMilliWh / 1000,
+        ),
+      );
+    }
+    return points;
+  }
+
   Map<String, dynamic> _asMap(dynamic value) {
     if (value is Map<String, dynamic>) {
       return value;
@@ -983,4 +995,18 @@ class _ConnectionSettings {
   final String host;
   final int port;
   final bool useHttps;
+}
+
+class _ByMinutePoint {
+  const _ByMinutePoint({
+    required this.start,
+    required this.end,
+    required this.energyMilliWh,
+    required this.energyWh,
+  });
+
+  final DateTime start;
+  final DateTime end;
+  final double energyMilliWh;
+  final double energyWh;
 }

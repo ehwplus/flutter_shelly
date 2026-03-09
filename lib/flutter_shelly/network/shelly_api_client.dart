@@ -163,6 +163,61 @@ abstract class ShellyApiClient {
     return byPeriod;
   }
 
+  Future<ShellyEnergyData> getNetEnergies({
+    required DateTime startDate,
+    required DateTime endDate,
+    ShellyEnergyPeriod period = ShellyEnergyPeriod.hourly,
+    int componentId = 0,
+    String? rpcNamespace,
+    String? metricKey,
+    bool addKeys = true,
+  }) async {
+    final candidateNamespaces = _resolveNetEnergiesNamespaces(
+      preferredRpcNamespace: rpcNamespace,
+    );
+    final result = await _getNetEnergiesInternal(
+      period: period,
+      startDate: startDate,
+      endDate: endDate,
+      componentId: componentId,
+      metricKey: metricKey,
+      addKeys: addKeys,
+      candidateRpcNamespaces: candidateNamespaces,
+    );
+    return result.data;
+  }
+
+  Future<Map<ShellyEnergyPeriod, ShellyEnergyData>>
+  getNetEnergiesForAllPeriods({
+    required DateTime startDate,
+    required DateTime endDate,
+    int componentId = 0,
+    String? rpcNamespace,
+    String? metricKey,
+    bool addKeys = true,
+  }) async {
+    final byPeriod = <ShellyEnergyPeriod, ShellyEnergyData>{};
+    var candidateNamespaces = _resolveNetEnergiesNamespaces(
+      preferredRpcNamespace: rpcNamespace,
+    );
+
+    for (final period in ShellyEnergyPeriod.values) {
+      final result = await _getNetEnergiesInternal(
+        period: period,
+        startDate: startDate,
+        endDate: endDate,
+        componentId: componentId,
+        metricKey: metricKey,
+        addKeys: addKeys,
+        candidateRpcNamespaces: candidateNamespaces,
+      );
+      byPeriod[period] = result.data;
+      candidateNamespaces = [result.rpcNamespace];
+    }
+
+    return byPeriod;
+  }
+
   Future<Map<String, dynamic>> callRpc(
     String method, {
     Map<String, dynamic>? params,
@@ -350,8 +405,95 @@ abstract class ShellyApiClient {
     };
   }
 
+  Future<_ShellyNetEnergiesResult> _getNetEnergiesInternal({
+    required ShellyEnergyPeriod period,
+    required DateTime startDate,
+    required DateTime endDate,
+    required int componentId,
+    required bool addKeys,
+    required List<String> candidateRpcNamespaces,
+    String? metricKey,
+  }) async {
+    Object? lastUnsupportedError;
+    for (final rawNamespace in candidateRpcNamespaces) {
+      final rpcNamespace = _toRpcNamespace(rawNamespace);
+      final interval = _intervalFromPeriod(
+        period: period,
+        startDate: startDate,
+        endDate: endDate,
+        componentId: componentId,
+        rpcNamespace: rpcNamespace,
+        addKeys: addKeys,
+        metricKey: metricKey,
+      );
+      final method = '$rpcNamespace.GetNetEnergies';
+      try {
+        final response = await callRpc(method, params: interval.toParams());
+        final data = ShellyEnergyData.fromJson(response, interval: interval);
+        return _ShellyNetEnergiesResult(data: data, rpcNamespace: rpcNamespace);
+      } catch (error) {
+        if (_isNoHandlerError(error, method)) {
+          lastUnsupportedError = error;
+          continue;
+        }
+        rethrow;
+      }
+    }
+
+    if (lastUnsupportedError != null) {
+      throw StateError(
+        'GetNetEnergies is not available for namespaces: '
+        '${candidateRpcNamespaces.join(', ')}',
+      );
+    }
+
+    throw StateError('No RPC namespace configured for GetNetEnergies.');
+  }
+
+  List<String> _resolveNetEnergiesNamespaces({String? preferredRpcNamespace}) {
+    final namespaces = <String>[];
+    final seen = <String>{};
+
+    void addNamespace(String value) {
+      final trimmed = value.trim();
+      if (trimmed.isEmpty) {
+        return;
+      }
+      final normalized = _toRpcNamespace(trimmed);
+      final key = normalized.toLowerCase();
+      if (seen.contains(key)) {
+        return;
+      }
+      seen.add(key);
+      namespaces.add(normalized);
+    }
+
+    if (preferredRpcNamespace != null) {
+      addNamespace(preferredRpcNamespace);
+    }
+
+    addNamespace('Switch');
+    addNamespace('EMData');
+    addNamespace('EM1Data');
+
+    return namespaces;
+  }
+
+  bool _isNoHandlerError(Object error, String method) {
+    if (error is! ShellyApiException) {
+      return false;
+    }
+
+    final message = error.message.toLowerCase();
+    final methodLower = method.toLowerCase();
+    return error.code == 404 &&
+        message.contains('no handler') &&
+        message.contains(methodLower);
+  }
+
   String _toRpcNamespace(String value) {
     return switch (value.toLowerCase()) {
+      'switch' => 'Switch',
       'emdata' => 'EMData',
       'em1data' => 'EM1Data',
       _ => value,
@@ -418,4 +560,14 @@ class ShellyEnergyComponent {
 
   final String rpcNamespace;
   final int id;
+}
+
+class _ShellyNetEnergiesResult {
+  const _ShellyNetEnergiesResult({
+    required this.data,
+    required this.rpcNamespace,
+  });
+
+  final ShellyEnergyData data;
+  final String rpcNamespace;
 }
